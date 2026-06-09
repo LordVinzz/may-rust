@@ -1,1 +1,7 @@
 may_rust/target/
+proofs/*.vo
+proofs/*.vos
+proofs/*.vok
+proofs/*.glob
+proofs/.*.aux
+.DS_Store
