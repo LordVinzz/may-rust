@@ -82,12 +82,12 @@ impl Parser {
             let type_name = self.ident();
             let generic = self.generic();
 
-            self.expect(Token::Lbrace, "part3");
+            self.expect(Token::Lbrace, "part2");
             let mut binds = Vec::new();
 
             while self.accept(&Token::Bind) {
                 let name = self.ident();
-                self.expect(Token::To, "part4");
+                self.expect(Token::To, "part3");
                 let mut target = vec![self.ident()];
 
                 if self.accept(&Token::Dot) {
@@ -97,7 +97,7 @@ impl Parser {
                 binds.push(Ast::Bind { name, target });
             }
 
-            self.expect(Token::Rbrace, "part5");
+            self.expect(Token::Rbrace, "part4");
 
             parts.push(Ast::Part {
                 name,
@@ -170,9 +170,9 @@ impl Parser {
         };
         let generic = self.generic();
 
-        self.expect(Token::Lbrace, "component3");
+        self.expect(Token::Lbrace, "component2");
         let body = Ast::SEQ(self.requires());
-        self.expect(Token::Rbrace, "component4");
+        self.expect(Token::Rbrace, "component3");
 
         Ast::Component {
             name,
