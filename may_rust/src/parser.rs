@@ -1,6 +1,7 @@
-use crate::ast::{Ast, ProvidedServiceImplementation, ServiceReference};
+use crate::ast::{Ast, ProvidedServiceImplementation, ServiceReference, Specializes};
 use crate::parser::lexer::Lexer;
 use crate::parser::lexer::token::Token;
+use std::fs::read_to_string;
 
 pub mod lexer;
 
@@ -13,6 +14,13 @@ impl Parser {
     pub fn new(file: &str) -> Self {
         Self {
             lexer: Lexer::new(file),
+            token: Token::EOF,
+        }
+    }
+
+    pub fn from(lexer: Lexer) -> Self {
+        Self {
+            lexer: lexer,
             token: Token::EOF,
         }
     }
@@ -171,7 +179,15 @@ impl Parser {
         self.expect(Token::Component, "before component name");
         let name = self.ident();
         let specializes = if self.accept(&Token::Specializes) {
-            Some(self.ident())
+            let spe_lexer = Lexer::from(&self.lexer);
+            let mut spe_parser = Parser::from(spe_lexer);
+            spe_parser.next_token();
+
+            let parent = self.ident();
+            Some(Specializes{
+                parent: parent.clone(),
+                parent_file: spe_parser.search_import(parent),
+            })
         } else {
             None
         };
@@ -208,5 +224,29 @@ impl Parser {
         });
 
         Ast::SEQ(nodes)
+    }
+
+    pub fn search_import(&mut self, import: String) -> Option<Box<Ast>>{
+        while self.accept(&Token::Import) {
+            let file = self.path();
+
+            if file.iter().position(|x| x==&import) != None {
+                //To do : get the path to the parent file
+                let mut path = String::from("../examples/speadl/");
+                path.push_str(&import);
+                path.push_str(".speadl");
+
+                let source = read_to_string(path).ok()?;
+
+                let mut parser = Parser::new(&source);
+
+                parser.next_token();
+                let ast = parser.namespace();
+                
+                return Some(Box::new(ast));
+            }
+        }
+        
+        None
     }
 }

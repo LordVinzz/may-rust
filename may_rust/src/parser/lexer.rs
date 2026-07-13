@@ -15,6 +15,13 @@ impl Lexer {
         }
     }
 
+    pub fn from(lexer: &Lexer) -> Self {
+        Self {
+            file: lexer.file.clone(),
+            ind: 0,
+        }
+    }
+
     fn current_char(&self) -> Option<char> {
         self.file.get(self.ind).copied()
     }
