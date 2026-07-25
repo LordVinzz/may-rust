@@ -1,5 +1,5 @@
 use super::ast::{
-    PyAlias, PyArg, PyArguments, PyClassDef, PyExpr, PyFunctionDef, PyImportFrom, PyKeyword,
+    PyAlias, PyArg, PyArguments, PyClassDef, PyExpr, PyFunctionDef, PyImportFrom,
     PyModule, PyStmt,
 };
 use crate::modules::speadl::ast::{Ast, ProvidedServiceImplementation, Specializes};
@@ -260,6 +260,13 @@ impl PythonComponent {
             ));
         }
 
+        for part_instance in self.init_part_instance() {
+            args.push(PyArg::with_annotation(
+                part_instance.name.clone(),
+                python_type_annotation(&part_instance.type_name),
+            ));
+        }
+
         let mut body = Vec::new();
 
         if let Some(parent) = &self.specializes {
@@ -284,7 +291,18 @@ impl PythonComponent {
         }
 
         for part_instance in &self.part_instances {
-            body.push(part_instance.to_python_assignment());
+            body.push(PyStmt::Assign {
+                targets: vec![self_store_attribute(&part_instance.name)],
+                value: PyExpr::load_name(part_instance.name.clone()),
+            });
+        }
+
+        for part_instance in &self.part_instances {
+            let mut ind = 0;
+            while ind < part_instance.bindings.len(){
+                body.push(part_instance.to_python_assignment(ind));
+                ind += 1;
+            }
         }
 
         body.push(PyStmt::Return(None));
@@ -316,6 +334,21 @@ impl PythonComponent {
         }
 
         required_services
+    }
+
+    fn init_part_instance(&self) -> Vec<&PartInstance> {
+        let mut part_instances = Vec::new();
+
+        for part_instance in &self.part_instances {
+            if !part_instances
+                .iter()
+                .any(|existing: &&PartInstance| existing.name == part_instance.name)
+            {
+                part_instances.push(part_instance);
+            }
+        }
+
+        part_instances
     }
 
     fn output_path(&self, output: Option<&Path>) -> PathBuf {
@@ -436,23 +469,11 @@ impl ProvidedService {
 }
 
 impl PartInstance {
-    fn to_python_assignment(&self) -> PyStmt {
+    fn to_python_assignment(&self, ind: usize) -> PyStmt {
         PyStmt::Assign {
-            targets: vec![self_store_attribute(&self.name)],
-            value: PyExpr::call_with_keywords(
-                PyExpr::load_name(self.type_name.clone()),
-                self.bindings
-                    .iter()
-                    .map(PartBinding::to_python_keyword)
-                    .collect(),
-            ),
+            targets: vec![self_store_attribute(&vec![self.name.clone(), self.bindings[ind].parameter_name.clone()].join("."))],
+            value: PyExpr::load_name(vec![String::from("self"), self.bindings[ind].target.join(".")].join("."))
         }
-    }
-}
-
-impl PartBinding {
-    fn to_python_keyword(&self) -> PyKeyword {
-        PyKeyword::named(self.parameter_name.clone(), self_load_path(&self.target))
     }
 }
 
