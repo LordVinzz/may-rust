@@ -295,7 +295,9 @@ impl PythonComponent {
                 targets: vec![self_store_attribute(&part_instance.name)],
                 value: PyExpr::load_name(part_instance.name.clone()),
             });
+        }
 
+        for part_instance in &self.part_instances {
             let mut ind = 0;
             while ind < part_instance.bindings.len(){
                 body.push(part_instance.to_python_assignment(ind));

@@ -7,8 +7,8 @@ class CompTraceur:
     def __init__(self, simple: Simple, traceur: Traceur, client: Client):
         self.simple = simple
         self.traceur = traceur
-        self.traceur.starter = self.simple.starter
         self.client = client
+        self.traceur.starter = self.simple.starter
         self.client.demarreur = self.traceur.demarreur
         return
 

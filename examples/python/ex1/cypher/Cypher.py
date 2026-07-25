@@ -7,8 +7,8 @@ class Cypher(Traceur):
     def __init__(self, starter: Start, codeur: Codec, decodeur: Codec):
         super().__init__(starter)
         self.codeur = codeur
-        self.codeur.message = self.starter
         self.decodeur = decodeur
+        self.codeur.message = self.starter
         self.decodeur.message = self.codeur.crypt
         return
 

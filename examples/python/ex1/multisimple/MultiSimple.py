@@ -9,8 +9,8 @@ class MultiSimple:
         self.simple2 = simple2
         self.simple3 = simple3
         self.client = client
-        self.client.demarreur = self.connecteur.starter
         self.connecteur = connecteur
+        self.client.demarreur = self.connecteur.starter
         self.connecteur.demarreur1 = self.simple1.starter
         self.connecteur.demarreur2 = self.simple2.starter
         self.connecteur.demarreur3 = self.simple3.starter
