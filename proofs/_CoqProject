@@ -1,2 +1,7 @@
 -Q . MayRustProofs
 Grammar.v
+LexerCorrectness.v
+ParserDeterminism.v
+ParserEquivalence.v
+ParserCompleteness.v
+ImportResolution.v
