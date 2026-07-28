@@ -259,7 +259,8 @@ fn default_input_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("examples")
-        .join("speadl")
+        .join("all")
+        .join("ex1")
 }
 
 fn speadl_files_in(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {

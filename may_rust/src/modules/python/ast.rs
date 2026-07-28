@@ -17,6 +17,8 @@ pub enum PyStmt {
     FunctionDef(PyFunctionDef),
     Expr(PyExpr),
     Return(Option<PyExpr>),
+    Raise(PyExpr),
+    If(PyIf),
     Assign { targets: Vec<PyExpr>, value: PyExpr },
     Pass,
 }
@@ -39,6 +41,7 @@ pub struct PyClassDef {
     pub name: String,
     pub bases: Vec<PyExpr>,
     pub body: Vec<PyStmt>,
+    pub decorators: Vec<PyExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +50,14 @@ pub struct PyFunctionDef {
     pub args: PyArguments,
     pub body: Vec<PyStmt>,
     pub returns: Option<PyExpr>,
+    pub decorators: Vec<PyExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PyIf {
+    pub test: PyExpr,
+    pub body: Vec<PyStmt>,
+    pub orelse: Vec<PyStmt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +87,12 @@ pub enum PyExpr {
         args: Vec<PyExpr>,
         keywords: Vec<PyKeyword>,
     },
+    ConstantString(String),
+    Compare {
+        left: Box<PyExpr>,
+        operator: PyCmpOp,
+        right: Box<PyExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +105,11 @@ pub struct PyKeyword {
 pub enum PyExprContext {
     Load,
     Store,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PyCmpOp {
+    Is,
 }
 
 #[derive(Debug)]
@@ -136,24 +158,24 @@ impl PyModule {
         let script = format!(
             r#"import ast
 
-def class_def(name, bases, body):
+def class_def(name, bases, body, decorators):
     fields = {{
         "name": name,
         "bases": bases,
         "keywords": [],
         "body": body,
-        "decorator_list": [],
+        "decorator_list": decorators,
     }}
     if "type_params" in ast.ClassDef._fields:
         fields["type_params"] = []
     return ast.ClassDef(**fields)
 
-def function_def(name, args, body, returns):
+def function_def(name, args, body, returns, decorators):
     fields = {{
         "name": name,
         "args": args,
         "body": body,
-        "decorator_list": [],
+        "decorator_list": decorators,
         "returns": returns,
         "type_comment": None,
     }}
@@ -203,6 +225,11 @@ impl PyStmt {
                 Some(value) => format!("ast.Return(value={})", value.to_python_ast_constructor()),
                 None => String::from("ast.Return(value=None)"),
             },
+            Self::Raise(exception) => format!(
+                "ast.Raise(exc={}, cause=None)",
+                exception.to_python_ast_constructor()
+            ),
+            Self::If(if_statement) => if_statement.to_python_ast_constructor(),
             Self::Assign { targets, value } => format!(
                 "ast.Assign(targets={}, value={}, type_comment=None)",
                 py_list(targets.iter().map(PyExpr::to_python_ast_constructor)),
@@ -244,10 +271,15 @@ impl PyAlias {
 impl PyClassDef {
     fn to_python_ast_constructor(&self) -> String {
         format!(
-            "class_def(name={}, bases={}, body={})",
+            "class_def(name={}, bases={}, body={}, decorators={})",
             py_string(&self.name),
             py_list(self.bases.iter().map(PyExpr::to_python_ast_constructor)),
-            py_list(self.body.iter().map(PyStmt::to_python_ast_constructor))
+            py_list(self.body.iter().map(PyStmt::to_python_ast_constructor)),
+            py_list(
+                self.decorators
+                    .iter()
+                    .map(PyExpr::to_python_ast_constructor)
+            )
         )
     }
 }
@@ -255,11 +287,27 @@ impl PyClassDef {
 impl PyFunctionDef {
     fn to_python_ast_constructor(&self) -> String {
         format!(
-            "function_def(name={}, args={}, body={}, returns={})",
+            "function_def(name={}, args={}, body={}, returns={}, decorators={})",
             py_string(&self.name),
             self.args.to_python_ast_constructor(),
             py_list(self.body.iter().map(PyStmt::to_python_ast_constructor)),
-            py_optional_expr(self.returns.as_ref())
+            py_optional_expr(self.returns.as_ref()),
+            py_list(
+                self.decorators
+                    .iter()
+                    .map(PyExpr::to_python_ast_constructor)
+            )
+        )
+    }
+}
+
+impl PyIf {
+    fn to_python_ast_constructor(&self) -> String {
+        format!(
+            "ast.If(test={}, body={}, orelse={})",
+            self.test.to_python_ast_constructor(),
+            py_list(self.body.iter().map(PyStmt::to_python_ast_constructor)),
+            py_list(self.orelse.iter().map(PyStmt::to_python_ast_constructor))
         )
     }
 }
@@ -309,6 +357,13 @@ impl PyExpr {
         }
     }
 
+    pub fn store_name(id: impl Into<String>) -> Self {
+        Self::Name {
+            id: id.into(),
+            ctx: PyExprContext::Store,
+        }
+    }
+
     pub fn load_attribute(value: PyExpr, attr: impl Into<String>) -> Self {
         Self::Attribute {
             value: Box::new(value),
@@ -341,6 +396,18 @@ impl PyExpr {
         }
     }
 
+    pub fn string(value: impl Into<String>) -> Self {
+        Self::ConstantString(value.into())
+    }
+
+    pub fn is(left: PyExpr, right: PyExpr) -> Self {
+        Self::Compare {
+            left: Box::new(left),
+            operator: PyCmpOp::Is,
+            right: Box::new(right),
+        }
+    }
+
     fn to_python_ast_constructor(&self) -> String {
         match self {
             Self::Name { id, ctx } => format!(
@@ -363,6 +430,19 @@ impl PyExpr {
                 func.to_python_ast_constructor(),
                 py_list(args.iter().map(PyExpr::to_python_ast_constructor)),
                 py_list(keywords.iter().map(PyKeyword::to_python_ast_constructor))
+            ),
+            Self::ConstantString(value) => {
+                format!("ast.Constant(value={})", py_string(value))
+            }
+            Self::Compare {
+                left,
+                operator,
+                right,
+            } => format!(
+                "ast.Compare(left={}, ops=[{}], comparators=[{}])",
+                left.to_python_ast_constructor(),
+                operator.to_python_ast_constructor(),
+                right.to_python_ast_constructor()
             ),
         }
     }
@@ -390,6 +470,14 @@ impl PyExprContext {
         match self {
             Self::Load => "ast.Load()",
             Self::Store => "ast.Store()",
+        }
+    }
+}
+
+impl PyCmpOp {
+    fn to_python_ast_constructor(self) -> &'static str {
+        match self {
+            Self::Is => "ast.Is()",
         }
     }
 }
