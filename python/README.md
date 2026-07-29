@@ -14,10 +14,10 @@ If generated sources are missing or stale, regenerate them first:
 
 ```sh
 cd may_rust
-cargo run -- -i ../examples/all/ex1 -o ../output/python --keep-intermediate
+cargo run -- --target python -i ../speadl/ex1 -o ../output/python --keep-intermediate
 cd ..
 ```
 
 `python/ex1/Start.py` is the Python-native service contract used by the
-implementations. It is intentionally separate from `examples/all/ex1/Start.java`;
-no Java-to-Python transpilation is performed.
+implementations. It is intentionally separate from the Java service contracts;
+only SpeADL component descriptions are passed to the selected backend.

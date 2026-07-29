@@ -7,6 +7,7 @@ pub struct ServiceReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Specializes {
     pub parent: String,
+    pub argument: Option<String>,
     pub parent_file: Option<Box<Ast>>,
 }
 

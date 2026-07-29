@@ -88,18 +88,18 @@ impl Parser {
         }
     }
 
-    fn part(&mut self) -> Vec<Ast> {
-        let mut parts = Vec::new();
+    fn part(&mut self) -> Ast {
+        self.expect(
+            Token::Extended(SpeadlTokenExtension::Part),
+            "before part name",
+        );
+        let name = self.ident();
+        self.expect(Token::Common(CommonToken::Colon), "after part name");
+        let type_name = self.ident();
+        let generic = self.generic();
+        let mut binds = Vec::new();
 
-        while self.accept(&Token::Extended(SpeadlTokenExtension::Part)) {
-            let name = self.ident();
-            self.expect(Token::Common(CommonToken::Colon), "after part name");
-            let type_name = self.ident();
-            let generic = self.generic();
-
-            self.expect(Token::Common(CommonToken::Lbrace), "before part body");
-            let mut binds = Vec::new();
-
+        if self.accept(&Token::Common(CommonToken::Lbrace)) {
             while self.accept(&Token::Extended(SpeadlTokenExtension::Bind)) {
                 let name = self.ident();
                 self.expect(Token::Extended(SpeadlTokenExtension::To), "after bind name");
@@ -113,81 +113,96 @@ impl Parser {
             }
 
             self.expect(Token::Common(CommonToken::Rbrace), "after part body");
-
-            parts.push(Ast::Part {
-                name,
-                type_name,
-                generic,
-                body: Box::new(Ast::SEQ(binds)),
-            });
         }
 
-        parts
-    }
-
-    fn provides(&mut self) -> Vec<Ast> {
-        let mut nodes = Vec::new();
-
-        if self.accept(&Token::Extended(SpeadlTokenExtension::Provides)) {
-            loop {
-                let name = self.ident();
-                self.expect(
-                    Token::Common(CommonToken::Colon),
-                    "after provided service name",
-                );
-                let type_name = self.ident();
-                let implementation = if self.accept(&Token::Common(CommonToken::Equals)) {
-                    let part_name = self.ident();
-                    self.expect(
-                        Token::Common(CommonToken::Dot),
-                        "between delegated part and service name",
-                    );
-                    let service_name = self.ident();
-                    ProvidedServiceImplementation::Delegated(ServiceReference {
-                        part_name,
-                        service_name,
-                    })
-                } else {
-                    ProvidedServiceImplementation::Local
-                };
-
-                nodes.push(Ast::Provides {
-                    name,
-                    type_name,
-                    implementation,
-                });
-
-                if !self.accept(&Token::Extended(SpeadlTokenExtension::Provides)) {
-                    break;
-                }
-            }
-            nodes.extend(self.part());
-        } else {
-            panic!(
-                "Syntax error in component body: expected at least one `provides name: Type` declaration, found {:?}.",
-                self.token
-            )
+        Ast::Part {
+            name,
+            type_name,
+            generic,
+            body: Box::new(Ast::SEQ(binds)),
         }
-
-        nodes
     }
 
-    fn requires(&mut self) -> Vec<Ast> {
-        let mut nodes = Vec::new();
-
-        while self.accept(&Token::Extended(SpeadlTokenExtension::Requires)) {
-            let name = self.ident();
+    fn provides(&mut self) -> Ast {
+        self.expect(
+            Token::Extended(SpeadlTokenExtension::Provides),
+            "before provided service name",
+        );
+        let name = self.ident();
+        self.expect(
+            Token::Common(CommonToken::Colon),
+            "after provided service name",
+        );
+        let type_name = self.ident();
+        let implementation = if self.accept(&Token::Common(CommonToken::Equals)) {
+            let part_name = self.ident();
             self.expect(
-                Token::Common(CommonToken::Colon),
-                "after required service name",
+                Token::Common(CommonToken::Dot),
+                "between delegated part and service name",
             );
-            let type_name = self.ident();
-            nodes.push(Ast::Requires { name, type_name });
+            let service_name = self.ident();
+            ProvidedServiceImplementation::Delegated(ServiceReference {
+                part_name,
+                service_name,
+            })
+        } else {
+            ProvidedServiceImplementation::Local
+        };
+
+        Ast::Provides {
+            name,
+            type_name,
+            implementation,
+        }
+    }
+
+    fn requires(&mut self) -> Ast {
+        self.expect(
+            Token::Extended(SpeadlTokenExtension::Requires),
+            "before required service name",
+        );
+        let name = self.ident();
+        self.expect(
+            Token::Common(CommonToken::Colon),
+            "after required service name",
+        );
+        let type_name = self.ident();
+
+        Ast::Requires { name, type_name }
+    }
+
+    fn component_body(&mut self) -> Vec<Ast> {
+        let mut nodes = Vec::new();
+
+        loop {
+            let node = match &self.token {
+                Token::Extended(SpeadlTokenExtension::Requires) => self.requires(),
+                Token::Extended(SpeadlTokenExtension::Provides) => self.provides(),
+                Token::Extended(SpeadlTokenExtension::Part) => self.part(),
+                Token::Common(CommonToken::Rbrace) => break,
+                _ => panic!(
+                    "Syntax error in component body: found {:?}, expected `requires`, `provides`, `part`, or `}}`.",
+                    self.token
+                ),
+            };
+            nodes.push(node);
         }
 
-        nodes.extend(self.provides());
-
         nodes
+    }
+
+    fn specializes(&mut self) -> Option<Specializes> {
+        if !self.accept(&Token::Extended(SpeadlTokenExtension::Specializes)) {
+            return None;
+        }
+
+        let parent = self.ident();
+        let argument = self.generic();
+        Some(Specializes {
+            parent: parent.clone(),
+            argument,
+            parent_file: self.search_import(parent),
+        })
     }
 
     fn component(&mut self) -> Ast {
@@ -196,19 +211,11 @@ impl Parser {
             "before component name",
         );
         let name = self.ident();
-        let specializes = if self.accept(&Token::Extended(SpeadlTokenExtension::Specializes)) {
-            let parent = self.ident();
-            Some(Specializes {
-                parent: parent.clone(),
-                parent_file: self.search_import(parent),
-            })
-        } else {
-            None
-        };
         let generic = self.generic();
+        let specializes = self.specializes();
 
         self.expect(Token::Common(CommonToken::Lbrace), "before component body");
-        let body = Ast::SEQ(self.requires());
+        let body = Ast::SEQ(self.component_body());
         self.expect(Token::Common(CommonToken::Rbrace), "after component body");
 
         Ast::Component {
@@ -236,6 +243,7 @@ impl Parser {
         self.expect(Token::Common(CommonToken::Lbrace), "before namespace body");
         let body = self.component();
         self.expect(Token::Common(CommonToken::Rbrace), "after namespace body");
+        self.expect(Token::Common(CommonToken::EOF), "after namespace");
 
         attach_specialized_parent_to_imports(&mut nodes, &body);
 
@@ -309,5 +317,281 @@ fn attach_specialized_parent_to_imports(imports: &mut [Ast], component: &Ast) {
             *ast = Some(parent_file.clone());
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn parse(source: &str) -> Ast {
+        let mut parser = Parser::new(source);
+        parser.next_token();
+        parser.namespace()
+    }
+
+    fn component_from(ast: &Ast) -> &Ast {
+        let Ast::SEQ(nodes) = ast else {
+            panic!("expected a top-level sequence");
+        };
+        let Some(Ast::Namespace { body, .. }) = nodes.last() else {
+            panic!("expected a namespace");
+        };
+        body
+    }
+
+    #[test]
+    fn parses_official_generic_then_specializes_header_order() {
+        let ast = parse(
+            "import demo.Parent
+             namespace demo.child {
+                 component Child[T] specializes Parent[String] {}
+             }",
+        );
+
+        let Ast::Component {
+            name,
+            specializes,
+            generic,
+            body,
+        } = component_from(&ast)
+        else {
+            panic!("expected a component");
+        };
+
+        assert_eq!(name, "Child");
+        assert_eq!(generic.as_deref(), Some("T"));
+        assert_eq!(
+            specializes
+                .as_ref()
+                .map(|specializes| specializes.parent.as_str()),
+            Some("Parent")
+        );
+        assert_eq!(
+            specializes
+                .as_ref()
+                .and_then(|specializes| specializes.argument.as_deref()),
+            Some("String")
+        );
+        assert_eq!(body.as_ref(), &Ast::SEQ(Vec::new()));
+    }
+
+    #[test]
+    fn brackets_after_parent_are_the_official_parent_argument() {
+        let ast = parse(
+            "namespace demo {
+                 component Child specializes Parent[T] {}
+             }",
+        );
+
+        let Ast::Component {
+            specializes,
+            generic,
+            ..
+        } = component_from(&ast)
+        else {
+            panic!("expected a component");
+        };
+
+        assert_eq!(generic, &None);
+        assert_eq!(
+            specializes
+                .as_ref()
+                .map(|specializes| specializes.parent.as_str()),
+            Some("Parent")
+        );
+        assert_eq!(
+            specializes
+                .as_ref()
+                .and_then(|specializes| specializes.argument.as_deref()),
+            Some("T")
+        );
+    }
+
+    #[test]
+    fn accepts_a_component_parameter_without_a_parent_argument() {
+        let ast = parse(
+            "namespace demo {
+                 component Child[T] specializes Parent {}
+             }",
+        );
+
+        let Ast::Component {
+            specializes,
+            generic,
+            ..
+        } = component_from(&ast)
+        else {
+            panic!("expected a component");
+        };
+
+        assert_eq!(generic.as_deref(), Some("T"));
+        assert_eq!(
+            specializes
+                .as_ref()
+                .and_then(|specializes| specializes.argument.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_component_declarations_in_source_order() {
+        let ast = parse(
+            "namespace demo {
+                 component Mixed {
+                     part worker: Worker
+                     provides delegated: Api = worker.api
+                     requires input: Input
+                     provides local: Api
+                     part client: Client {
+                         bind dependency to worker.api
+                     }
+                     requires output: Output
+                 }
+             }",
+        );
+
+        let Ast::Component { body, .. } = component_from(&ast) else {
+            panic!("expected a component");
+        };
+        let Ast::SEQ(nodes) = body.as_ref() else {
+            panic!("expected a component body sequence");
+        };
+
+        assert!(matches!(nodes[0], Ast::Part { ref name, .. } if name == "worker"));
+        assert!(matches!(
+            nodes[1],
+            Ast::Provides {
+                ref name,
+                implementation: ProvidedServiceImplementation::Delegated(
+                    ServiceReference {
+                        ref part_name,
+                        ref service_name,
+                    }
+                ),
+                ..
+            } if name == "delegated" && part_name == "worker" && service_name == "api"
+        ));
+        assert!(matches!(nodes[2], Ast::Requires { ref name, .. } if name == "input"));
+        assert!(matches!(
+            nodes[3],
+            Ast::Provides {
+                ref name,
+                implementation: ProvidedServiceImplementation::Local,
+                ..
+            } if name == "local"
+        ));
+        assert!(matches!(nodes[4], Ast::Part { ref name, .. } if name == "client"));
+        assert!(matches!(nodes[5], Ast::Requires { ref name, .. } if name == "output"));
+
+        let Ast::Part { body, .. } = &nodes[4] else {
+            unreachable!();
+        };
+        assert_eq!(
+            body.as_ref(),
+            &Ast::SEQ(vec![Ast::Bind {
+                name: "dependency".to_string(),
+                target: vec!["worker".to_string(), "api".to_string()],
+            }])
+        );
+    }
+
+    #[test]
+    fn accepts_zero_provided_ports_and_a_part_without_a_body() {
+        let ast = parse(
+            "namespace demo {
+                 component Consumer {
+                     requires input: Input
+                     part worker: Worker[T]
+                 }
+             }",
+        );
+
+        let Ast::Component { body, .. } = component_from(&ast) else {
+            panic!("expected a component");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &Ast::SEQ(vec![
+                Ast::Requires {
+                    name: "input".to_string(),
+                    type_name: "Input".to_string(),
+                },
+                Ast::Part {
+                    name: "worker".to_string(),
+                    type_name: "Worker".to_string(),
+                    generic: Some("T".to_string()),
+                    body: Box::new(Ast::SEQ(Vec::new())),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn resolves_imported_parent_with_official_header_order() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "may-rust-speadl-parser-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("temporary directory should be created");
+
+        let parent_path = directory.join("Parent.speadl");
+        fs::write(
+            &parent_path,
+            "namespace demo { component Parent[T] { provides api: T } }",
+        )
+        .expect("parent source should be written");
+
+        let child_path = directory.join("Child.speadl");
+        let mut parser = Parser::new_with_path(
+            "import demo.Parent
+             namespace demo {
+                 component Child[T] specializes Parent[Api] {
+                     requires input: Input
+                 }
+             }",
+            &child_path,
+        );
+        parser.next_token();
+        let ast = parser.namespace();
+
+        let Ast::SEQ(nodes) = &ast else {
+            panic!("expected a top-level sequence");
+        };
+        let Ast::Import {
+            ast: Some(imported_parent),
+            ..
+        } = &nodes[0]
+        else {
+            panic!("expected the imported parent AST to be attached");
+        };
+        assert!(matches!(
+            component_from(imported_parent),
+            Ast::Component { name, .. } if name == "Parent"
+        ));
+
+        let Ast::Component {
+            specializes: Some(specializes),
+            ..
+        } = component_from(&ast)
+        else {
+            panic!("expected a specialized component");
+        };
+        assert!(specializes.parent_file.is_some());
+        assert_eq!(specializes.argument.as_deref(), Some("Api"));
+
+        fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    #[should_panic(expected = "after namespace")]
+    fn rejects_tokens_after_namespace() {
+        parse("namespace demo { component Child {} } trailing");
     }
 }

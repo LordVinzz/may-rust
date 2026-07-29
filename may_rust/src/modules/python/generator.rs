@@ -28,6 +28,7 @@ struct PythonComponent {
     imports: Vec<ImportList>,
     name: String,
     parent: Option<String>,
+    parent_argument: Option<String>,
     generic: Option<String>,
     required_services: Vec<RequiredService>,
     provided_services: Vec<ProvidedService>,
@@ -179,6 +180,9 @@ impl PythonComponent {
             imports,
             name: name.clone(),
             parent: specializes.as_ref().map(|parent| parent.parent.clone()),
+            parent_argument: specializes
+                .as_ref()
+                .and_then(|parent| parent.argument.clone()),
             generic: generic.clone(),
             required_services: Vec::new(),
             provided_services: Vec::new(),
@@ -293,7 +297,10 @@ impl PythonComponent {
     fn class_bases(&self) -> Vec<PyExpr> {
         let mut bases = Vec::new();
         if let Some(parent) = &self.parent {
-            bases.push(PyExpr::load_name(parent));
+            bases.push(python_type_annotation(
+                parent,
+                self.parent_argument.as_deref(),
+            ));
         } else {
             bases.push(PyExpr::load_name("ABC"));
         }
@@ -853,6 +860,26 @@ mod tests {
         assert!(source.contains("def make_demarreur(self) -> Start:"));
         assert!(!source.contains("@abstractmethod\n    def make_demarreur(self) -> Start:"));
         assert!(source.contains("part._bind_message(self.requires().starter())"));
+    }
+
+    #[test]
+    fn parameterized_specialization_preserves_parent_argument() {
+        let source = GenPython::new(parse(
+            r#"
+            import demo.Parent
+            import demo.String
+            namespace demo {
+                component Child[T] specializes Parent[String] {}
+            }
+            "#,
+        ))
+        .render()
+        .expect("parameterized specialization should render");
+
+        assert!(source.contains("T = TypeVar('T')"));
+        assert!(source.contains("class Child(Generic[T], Parent[String]):"));
+        assert!(source.contains("class _Requires(Parent._Requires):"));
+        assert!(source.contains("class _Parts(Parent._Parts):"));
     }
 
     #[test]
