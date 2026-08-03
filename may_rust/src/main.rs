@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     let options = match CliOptions::parse() {
         Ok(options) => options,
         Err(error) => {
-            eprintln!("Erreur: {error}");
+            eprintln!("Error: {error}");
             eprintln!("Utilisez `--help` pour afficher l'aide.");
             return ExitCode::from(2);
         }
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
     match run(options, target) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Erreur: {error}");
+            eprintln!("Error: {error}");
             ExitCode::FAILURE
         }
     }
@@ -73,7 +73,7 @@ fn print_help() {
 }
 
 fn print_usage_error(message: &str) -> ExitCode {
-    println!("Erreur: {message}\n");
+    println!("Error: {message}\n");
     print_help();
     ExitCode::from(2)
 }
@@ -178,8 +178,8 @@ fn parse_input(input_path: &Path) -> Result<Ast, Box<dyn Error>> {
     let source = read_to_string(input_path)?;
     let mut parser = Parser::new_with_path(&source, input_path);
 
-    parser.next_token();
-    Ok(parser.namespace())
+    parser.next_token()?;
+    Ok(parser.namespace()?)
 }
 
 fn generate_component(
@@ -205,6 +205,7 @@ fn generate_component(
     match target {
         GenerationTarget::Python => {
             GenPython::new(ast)
+                .with_dependencies(component_catalog.to_vec())
                 .with_keep_intermediate(keep_intermediate)
                 .with_output(output_path)
                 .generate()?;

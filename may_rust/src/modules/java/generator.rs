@@ -712,13 +712,27 @@ impl ComponentCatalog {
                         part_instance.component.fqcn()
                     )));
                 }
-                resolve_binding_target(
+                let required_port = required
+                    .iter()
+                    .find(|port| port.name == binding.required_name)
+                    .expect("the required port was checked above");
+                let (source_type, _) = resolve_binding_target(
                     binding,
                     &effective_requires,
                     &effective_provides,
                     &effective_parts,
                     self,
                 )?;
+                if source_type != required_port.type_name {
+                    return Err(GenerationError::new(format!(
+                        "type mismatch in part `{}` binding `{}`: required port expects `{}`, but target `{}` provides `{}`",
+                        part.name,
+                        binding.required_name,
+                        required_port.type_name,
+                        binding.target.join("."),
+                        source_type
+                    )));
+                }
             }
             for required_port in required {
                 if !bound.contains(&required_port.name) {
@@ -732,7 +746,17 @@ impl ComponentCatalog {
 
         for provided in &component.provides {
             if let ProvidedServiceImplementation::Delegated(reference) = &provided.implementation {
-                resolve_delegation(reference, &effective_parts, self)?;
+                let delegated = resolve_delegation(reference, &effective_parts, self)?;
+                if delegated.type_name != provided.type_name {
+                    return Err(GenerationError::new(format!(
+                        "type mismatch in delegated provided port `{}`: declared as `{}`, but `{}.{}` provides `{}`",
+                        provided.name,
+                        provided.type_name,
+                        reference.part_name,
+                        reference.service_name,
+                        delegated.type_name
+                    )));
+                }
             }
         }
 
@@ -1997,8 +2021,8 @@ mod tests {
 
     fn parse(source: &str) -> Ast {
         let mut parser = Parser::new(source);
-        parser.next_token();
-        parser.namespace()
+        parser.next_token().expect("test source should lex");
+        parser.namespace().expect("test source should parse")
     }
 
     fn examples() -> Vec<Ast> {
@@ -2067,6 +2091,53 @@ mod tests {
         assert!(source.contains("initParts();"));
         assert!(source.contains("initProvidedPorts();"));
         assert!(source.contains("return this.client().letsgo();"));
+    }
+
+    #[test]
+    fn incompatible_binding_types_are_rejected_before_rendering() {
+        let source = parse(
+            "namespace mismatch { \
+             component Source { provides value: String } }",
+        );
+        let sink = parse(
+            "namespace mismatch { \
+             component Sink { requires input: Integer } }",
+        );
+        let owner = parse(
+            "import mismatch.Source import mismatch.Sink \
+             namespace mismatch { component Owner { \
+             part source: Source \
+             part sink: Sink { bind input to source.value } } }",
+        );
+
+        let result = GenJava::new(owner)
+            .with_dependencies(vec![source, sink])
+            .render();
+
+        assert!(
+            result.is_err(),
+            "Java generation must reject a String service bound to an Integer requirement"
+        );
+    }
+
+    #[test]
+    fn incompatible_delegated_port_types_are_rejected_before_rendering() {
+        let source = parse(
+            "namespace mismatch { \
+             component Source { provides value: String } }",
+        );
+        let owner = parse(
+            "import mismatch.Source namespace mismatch { component Owner { \
+             provides value: Integer = source.value \
+             part source: Source } }",
+        );
+
+        let result = GenJava::new(owner).with_dependencies(vec![source]).render();
+
+        assert!(
+            result.is_err(),
+            "Java generation must reject delegation from String to Integer"
+        );
     }
 
     #[test]

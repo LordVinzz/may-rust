@@ -23,6 +23,10 @@ impl CharReader {
         self.chars.get(self.index).copied()
     }
 
+    pub fn position(&self) -> usize {
+        self.index
+    }
+
     pub fn next_char(&mut self) {
         self.index += 1;
     }

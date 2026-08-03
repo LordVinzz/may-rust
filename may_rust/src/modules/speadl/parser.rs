@@ -2,6 +2,7 @@ use super::ast::{Ast, ProvidedServiceImplementation, ServiceReference, Specializ
 use super::lexer::Lexer;
 use super::token::{SpeadlTokenExtension, Token};
 use crate::modules::common::token::CommonToken;
+use std::fmt;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,33 @@ pub struct Parser {
     pub token: Token,
     source_dir: Option<PathBuf>,
     imports: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    message: String,
+}
+
+impl ParseError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl From<super::lexer::LexError> for ParseError {
+    fn from(error: super::lexer::LexError) -> Self {
+        Self::new(error.to_string())
+    }
 }
 
 impl Parser {
@@ -28,119 +56,120 @@ impl Parser {
         parser
     }
 
-    pub fn next_token(&mut self) {
-        self.token = self.lexer.next_token()
+    pub fn next_token(&mut self) -> Result<(), ParseError> {
+        self.token = self.lexer.next_token()?;
+        Ok(())
     }
 
-    fn accept(&mut self, t: &Token) -> bool {
+    fn accept(&mut self, t: &Token) -> Result<bool, ParseError> {
         if t == &self.token {
-            self.next_token();
-            return true;
+            self.next_token()?;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
-    fn expect(&mut self, expected: Token, context: &str) {
-        if self.accept(&expected) {
-            return;
+    fn expect(&mut self, expected: Token, context: &str) -> Result<(), ParseError> {
+        if self.accept(&expected)? {
+            return Ok(());
         }
 
-        panic!(
-            "Syntax error {context}: found {:?}, expected {:?}.",
+        Err(ParseError::new(format!(
+            "syntax error {context}: found {:?}, expected {:?}",
             self.token, expected
-        );
+        )))
     }
 
-    fn ident(&mut self) -> String {
+    fn ident(&mut self) -> Result<String, ParseError> {
         match &self.token {
             Token::Common(CommonToken::Identifier(name)) => {
                 let name = name.clone();
-                self.next_token();
-                name
+                self.next_token()?;
+                Ok(name)
             }
-            _ => panic!(
-                "Token inatendu : {:?}, attendait un identifiant.",
+            _ => Err(ParseError::new(format!(
+                "syntax error: found {:?}, expected an identifier",
                 self.token
-            ),
+            ))),
         }
     }
 
-    fn path(&mut self) -> Vec<String> {
-        let mut path = vec![self.ident()];
+    fn path(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut path = vec![self.ident()?];
 
-        while self.accept(&Token::Common(CommonToken::Dot)) {
-            path.push(self.ident());
+        while self.accept(&Token::Common(CommonToken::Dot))? {
+            path.push(self.ident()?);
         }
 
-        path
+        Ok(path)
     }
 
-    fn generic(&mut self) -> Option<String> {
-        if self.accept(&Token::Common(CommonToken::Lbracket)) {
-            let generic = self.ident();
+    fn generic(&mut self) -> Result<Option<String>, ParseError> {
+        if self.accept(&Token::Common(CommonToken::Lbracket))? {
+            let generic = self.ident()?;
             self.expect(
                 Token::Common(CommonToken::Rbracket),
                 "after generic parameter name",
-            );
-            Some(generic)
+            )?;
+            Ok(Some(generic))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    fn part(&mut self) -> Ast {
+    fn part(&mut self) -> Result<Ast, ParseError> {
         self.expect(
             Token::Extended(SpeadlTokenExtension::Part),
             "before part name",
-        );
-        let name = self.ident();
-        self.expect(Token::Common(CommonToken::Colon), "after part name");
-        let type_name = self.ident();
-        let generic = self.generic();
+        )?;
+        let name = self.ident()?;
+        self.expect(Token::Common(CommonToken::Colon), "after part name")?;
+        let type_name = self.ident()?;
+        let generic = self.generic()?;
         let mut binds = Vec::new();
 
-        if self.accept(&Token::Common(CommonToken::Lbrace)) {
-            while self.accept(&Token::Extended(SpeadlTokenExtension::Bind)) {
-                let name = self.ident();
-                self.expect(Token::Extended(SpeadlTokenExtension::To), "after bind name");
-                let mut target = vec![self.ident()];
+        if self.accept(&Token::Common(CommonToken::Lbrace))? {
+            while self.accept(&Token::Extended(SpeadlTokenExtension::Bind))? {
+                let name = self.ident()?;
+                self.expect(Token::Extended(SpeadlTokenExtension::To), "after bind name")?;
+                let mut target = vec![self.ident()?];
 
-                if self.accept(&Token::Common(CommonToken::Dot)) {
-                    target.push(self.ident());
+                if self.accept(&Token::Common(CommonToken::Dot))? {
+                    target.push(self.ident()?);
                 }
 
                 binds.push(Ast::Bind { name, target });
             }
 
-            self.expect(Token::Common(CommonToken::Rbrace), "after part body");
+            self.expect(Token::Common(CommonToken::Rbrace), "after part body")?;
         }
 
-        Ast::Part {
+        Ok(Ast::Part {
             name,
             type_name,
             generic,
             body: Box::new(Ast::SEQ(binds)),
-        }
+        })
     }
 
-    fn provides(&mut self) -> Ast {
+    fn provides(&mut self) -> Result<Ast, ParseError> {
         self.expect(
             Token::Extended(SpeadlTokenExtension::Provides),
             "before provided service name",
-        );
-        let name = self.ident();
+        )?;
+        let name = self.ident()?;
         self.expect(
             Token::Common(CommonToken::Colon),
             "after provided service name",
-        );
-        let type_name = self.ident();
-        let implementation = if self.accept(&Token::Common(CommonToken::Equals)) {
-            let part_name = self.ident();
+        )?;
+        let type_name = self.ident()?;
+        let implementation = if self.accept(&Token::Common(CommonToken::Equals))? {
+            let part_name = self.ident()?;
             self.expect(
                 Token::Common(CommonToken::Dot),
                 "between delegated part and service name",
-            );
-            let service_name = self.ident();
+            )?;
+            let service_name = self.ident()?;
             ProvidedServiceImplementation::Delegated(ServiceReference {
                 part_name,
                 service_name,
@@ -149,88 +178,90 @@ impl Parser {
             ProvidedServiceImplementation::Local
         };
 
-        Ast::Provides {
+        Ok(Ast::Provides {
             name,
             type_name,
             implementation,
-        }
+        })
     }
 
-    fn requires(&mut self) -> Ast {
+    fn requires(&mut self) -> Result<Ast, ParseError> {
         self.expect(
             Token::Extended(SpeadlTokenExtension::Requires),
             "before required service name",
-        );
-        let name = self.ident();
+        )?;
+        let name = self.ident()?;
         self.expect(
             Token::Common(CommonToken::Colon),
             "after required service name",
-        );
-        let type_name = self.ident();
+        )?;
+        let type_name = self.ident()?;
 
-        Ast::Requires { name, type_name }
+        Ok(Ast::Requires { name, type_name })
     }
 
-    fn component_body(&mut self) -> Vec<Ast> {
+    fn component_body(&mut self) -> Result<Vec<Ast>, ParseError> {
         let mut nodes = Vec::new();
 
         loop {
             let node = match &self.token {
-                Token::Extended(SpeadlTokenExtension::Requires) => self.requires(),
-                Token::Extended(SpeadlTokenExtension::Provides) => self.provides(),
-                Token::Extended(SpeadlTokenExtension::Part) => self.part(),
+                Token::Extended(SpeadlTokenExtension::Requires) => self.requires()?,
+                Token::Extended(SpeadlTokenExtension::Provides) => self.provides()?,
+                Token::Extended(SpeadlTokenExtension::Part) => self.part()?,
                 Token::Common(CommonToken::Rbrace) => break,
-                _ => panic!(
-                    "Syntax error in component body: found {:?}, expected `requires`, `provides`, `part`, or `}}`.",
-                    self.token
-                ),
+                _ => {
+                    return Err(ParseError::new(format!(
+                        "syntax error in component body: found {:?}, expected `requires`, `provides`, `part`, or `}}`",
+                        self.token
+                    )));
+                }
             };
             nodes.push(node);
         }
 
-        nodes
+        Ok(nodes)
     }
 
-    fn specializes(&mut self) -> Option<Specializes> {
-        if !self.accept(&Token::Extended(SpeadlTokenExtension::Specializes)) {
-            return None;
+    fn specializes(&mut self) -> Result<Option<Specializes>, ParseError> {
+        if !self.accept(&Token::Extended(SpeadlTokenExtension::Specializes))? {
+            return Ok(None);
         }
 
-        let parent = self.ident();
-        let argument = self.generic();
-        Some(Specializes {
+        let parent = self.ident()?;
+        let argument = self.generic()?;
+        Ok(Some(Specializes {
             parent: parent.clone(),
             argument,
             parent_file: self.search_import(parent),
-        })
+        }))
     }
 
-    fn component(&mut self) -> Ast {
+    fn component(&mut self) -> Result<Ast, ParseError> {
         self.expect(
             Token::Extended(SpeadlTokenExtension::Component),
             "before component name",
-        );
-        let name = self.ident();
-        let generic = self.generic();
-        let specializes = self.specializes();
+        )?;
+        let name = self.ident()?;
+        let generic = self.generic()?;
+        let specializes = self.specializes()?;
 
-        self.expect(Token::Common(CommonToken::Lbrace), "before component body");
-        let body = Ast::SEQ(self.component_body());
-        self.expect(Token::Common(CommonToken::Rbrace), "after component body");
+        self.expect(Token::Common(CommonToken::Lbrace), "before component body")?;
+        let body = Ast::SEQ(self.component_body()?);
+        self.expect(Token::Common(CommonToken::Rbrace), "after component body")?;
 
-        Ast::Component {
+        Ok(Ast::Component {
             name,
             specializes,
             generic,
             body: Box::new(body),
-        }
+        })
     }
 
-    pub fn namespace(&mut self) -> Ast {
+    pub fn namespace(&mut self) -> Result<Ast, ParseError> {
         let mut nodes = Vec::new();
 
-        while self.accept(&Token::Extended(SpeadlTokenExtension::Import)) {
-            let path = self.path();
+        while self.accept(&Token::Extended(SpeadlTokenExtension::Import))? {
+            let path = self.path()?;
             self.imports.push(path.clone());
             nodes.push(Ast::Import { path, ast: None });
         }
@@ -238,12 +269,12 @@ impl Parser {
         self.expect(
             Token::Extended(SpeadlTokenExtension::Namespace),
             "before namespace path",
-        );
-        let path = self.path();
-        self.expect(Token::Common(CommonToken::Lbrace), "before namespace body");
-        let body = self.component();
-        self.expect(Token::Common(CommonToken::Rbrace), "after namespace body");
-        self.expect(Token::Common(CommonToken::EOF), "after namespace");
+        )?;
+        let path = self.path()?;
+        self.expect(Token::Common(CommonToken::Lbrace), "before namespace body")?;
+        let body = self.component()?;
+        self.expect(Token::Common(CommonToken::Rbrace), "after namespace body")?;
+        self.expect(Token::Common(CommonToken::EOF), "after namespace")?;
 
         attach_specialized_parent_to_imports(&mut nodes, &body);
 
@@ -252,7 +283,7 @@ impl Parser {
             body: Box::new(body),
         });
 
-        Ast::SEQ(nodes)
+        Ok(Ast::SEQ(nodes))
     }
 
     pub fn search_import(&self, import: String) -> Option<Box<Ast>> {
@@ -264,8 +295,8 @@ impl Parser {
         let source = read_to_string(&source_path).ok()?;
         let mut parser = Parser::new_with_path(&source, &source_path);
 
-        parser.next_token();
-        let ast = parser.namespace();
+        parser.next_token().ok()?;
+        let ast = parser.namespace().ok()?;
 
         Some(Box::new(ast))
     }
@@ -328,8 +359,8 @@ mod tests {
 
     fn parse(source: &str) -> Ast {
         let mut parser = Parser::new(source);
-        parser.next_token();
-        parser.namespace()
+        parser.next_token().expect("test source should lex");
+        parser.namespace().expect("test source should parse")
     }
 
     fn component_from(ast: &Ast) -> &Ast {
@@ -434,6 +465,16 @@ mod tests {
                 .and_then(|specializes| specializes.argument.as_deref()),
             None
         );
+    }
+
+    #[test]
+    fn returns_a_descriptive_error_for_invalid_syntax() {
+        let mut parser = Parser::new("namespace demo { component Broken { requires } }");
+        parser.next_token().expect("fixture should lex");
+
+        let error = parser.namespace().expect_err("missing port name must fail");
+
+        assert!(error.to_string().contains("expected an identifier"));
     }
 
     #[test]
@@ -558,8 +599,8 @@ mod tests {
              }",
             &child_path,
         );
-        parser.next_token();
-        let ast = parser.namespace();
+        parser.next_token().expect("fixture should lex");
+        let ast = parser.namespace().expect("fixture should parse");
 
         let Ast::SEQ(nodes) = &ast else {
             panic!("expected a top-level sequence");

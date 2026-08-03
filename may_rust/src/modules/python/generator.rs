@@ -3,6 +3,7 @@ use super::ast::{
     PyStmt,
 };
 use crate::modules::speadl::ast::{Ast, ProvidedServiceImplementation, ServiceReference};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs::{self, create_dir_all};
 use std::io;
@@ -13,6 +14,7 @@ const UNSET_NAME: &str = "_UNSET";
 
 pub struct GenPython {
     ast: Ast,
+    dependencies: Vec<Ast>,
     options: GeneratorOptions,
 }
 
@@ -71,12 +73,22 @@ impl GenPython {
     pub fn new(ast: Ast) -> Self {
         Self {
             ast,
+            dependencies: Vec::new(),
             options: GeneratorOptions::default(),
         }
     }
 
     pub fn with_options(ast: Ast, options: GeneratorOptions) -> Self {
-        Self { ast, options }
+        Self {
+            ast,
+            dependencies: Vec::new(),
+            options,
+        }
+    }
+
+    pub fn with_dependencies(mut self, dependencies: Vec<Ast>) -> Self {
+        self.dependencies = dependencies;
+        self
     }
 
     pub fn with_keep_intermediate(mut self, keep_intermediate: bool) -> Self {
@@ -91,6 +103,7 @@ impl GenPython {
 
     pub fn render(&self) -> Result<String, Box<dyn Error>> {
         let component = PythonComponent::from_speadl_ast(&self.ast)?;
+        PythonCatalog::from_asts(&self.ast, &self.dependencies)?.validate(&component)?;
         let mut source = component.to_python_module().unparse()?;
         if !source.ends_with('\n') {
             source.push('\n');
@@ -100,6 +113,7 @@ impl GenPython {
 
     pub fn generate(&self) -> Result<(), Box<dyn Error>> {
         let component = PythonComponent::from_speadl_ast(&self.ast)?;
+        PythonCatalog::from_asts(&self.ast, &self.dependencies)?.validate(&component)?;
         let output_path = component.output_path(self.options.output.as_deref());
         let python_module = component.to_python_module();
 
@@ -120,6 +134,156 @@ impl GenPython {
     }
 }
 
+#[derive(Default)]
+struct PythonCatalog {
+    components: BTreeMap<String, PythonComponent>,
+}
+
+impl PythonCatalog {
+    fn from_asts(root: &Ast, dependencies: &[Ast]) -> Result<Self, Box<dyn Error>> {
+        let mut catalog = Self::default();
+        catalog.add_ast(root)?;
+        for dependency in dependencies {
+            catalog.add_ast(dependency)?;
+        }
+        Ok(catalog)
+    }
+
+    fn add_ast(&mut self, ast: &Ast) -> Result<(), Box<dyn Error>> {
+        let component = PythonComponent::from_speadl_ast(ast)?;
+        self.components.insert(component.fqcn(), component);
+        self.add_embedded_imports(ast)
+    }
+
+    fn add_embedded_imports(&mut self, ast: &Ast) -> Result<(), Box<dyn Error>> {
+        match ast {
+            Ast::SEQ(nodes) => {
+                for node in nodes {
+                    self.add_embedded_imports(node)?;
+                }
+            }
+            Ast::Import {
+                ast: Some(imported),
+                ..
+            } => self.add_ast(imported)?,
+            Ast::Namespace { body, .. } | Ast::Component { body, .. } | Ast::Part { body, .. } => {
+                self.add_embedded_imports(body)?
+            }
+            Ast::Import { ast: None, .. }
+            | Ast::Requires { .. }
+            | Ast::Provides { .. }
+            | Ast::Bind { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn resolve(&self, owner: &PythonComponent, name: &str) -> Option<&PythonComponent> {
+        if name.contains('.') {
+            return self.components.get(name);
+        }
+        owner
+            .imports
+            .iter()
+            .find(|import| import.path.last().is_some_and(|last| last == name))
+            .and_then(|import| self.components.get(&import.path.join(".")))
+            .or_else(|| {
+                self.components
+                    .get(&format!("{}.{}", owner.namespace.join("."), name))
+            })
+    }
+
+    fn validate(&self, component: &PythonComponent) -> Result<(), Box<dyn Error>> {
+        validate_python_identifiers(component)?;
+        for part in &component.parts {
+            let Some(part_component) = self.resolve(component, &part.type_name) else {
+                continue;
+            };
+            let mut bound = BTreeSet::new();
+            for binding in &part.bindings {
+                if !bound.insert(&binding.required_name) {
+                    return Err(invalid_ast(&format!(
+                        "part `{}` binds required port `{}` more than once",
+                        part.name, binding.required_name
+                    )));
+                }
+                let required = part_component
+                    .required_services
+                    .iter()
+                    .find(|port| port.name == binding.required_name)
+                    .ok_or_else(|| {
+                        invalid_ast(&format!(
+                            "part `{}` binds unknown required port `{}` of component `{}`",
+                            part.name,
+                            binding.required_name,
+                            part_component.fqcn()
+                        ))
+                    })?;
+                let source_type = self
+                    .binding_source_type(component, &binding.target)
+                    .ok_or_else(|| {
+                        invalid_ast(&format!(
+                            "binding `{}` in part `{}` targets an unknown port `{}`",
+                            binding.required_name,
+                            part.name,
+                            binding.target.join(".")
+                        ))
+                    })?;
+                if source_type != required.type_name {
+                    return Err(invalid_ast(&format!(
+                        "type mismatch in part `{}` binding `{}`: required port expects `{}`, but target `{}` provides `{}`",
+                        part.name,
+                        binding.required_name,
+                        required.type_name,
+                        binding.target.join("."),
+                        source_type
+                    )));
+                }
+            }
+            for required in &part_component.required_services {
+                if !bound.contains(&required.name) {
+                    return Err(invalid_ast(&format!(
+                        "part `{}` is missing a binding for required port `{}`",
+                        part.name, required.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn binding_source_type(&self, owner: &PythonComponent, target: &[String]) -> Option<String> {
+        match target {
+            [port] => owner
+                .required_services
+                .iter()
+                .find(|candidate| candidate.name == *port)
+                .map(|candidate| candidate.type_name.clone())
+                .or_else(|| {
+                    owner
+                        .provided_services
+                        .iter()
+                        .find(|candidate| candidate.name == *port)
+                        .map(|candidate| candidate.type_name.clone())
+                }),
+            [part_name, port] => {
+                let part = owner
+                    .parts
+                    .iter()
+                    .find(|candidate| candidate.name == *part_name)?;
+                self.resolve(owner, &part.type_name)
+                    .and_then(|component| {
+                        component
+                            .provided_services
+                            .iter()
+                            .find(|candidate| candidate.name == *port)
+                    })
+                    .map(|candidate| candidate.type_name.clone())
+            }
+            _ => None,
+        }
+    }
+}
+
 impl GeneratorOptions {
     pub fn keep_intermediate(mut self, keep_intermediate: bool) -> Self {
         self.keep_intermediate = keep_intermediate;
@@ -133,6 +297,9 @@ impl GeneratorOptions {
 }
 
 impl PythonComponent {
+    fn fqcn(&self) -> String {
+        format!("{}.{}", self.namespace.join("."), self.name)
+    }
     fn from_speadl_ast(ast: &Ast) -> Result<Self, Box<dyn Error>> {
         let Ast::SEQ(nodes) = ast else {
             return Err(invalid_ast(
@@ -765,6 +932,47 @@ fn invalid_ast(message: &str) -> Box<dyn Error> {
     ))
 }
 
+fn validate_python_identifiers(component: &PythonComponent) -> Result<(), Box<dyn Error>> {
+    for (context, identifier) in component
+        .namespace
+        .iter()
+        .map(|name| ("namespace segment", name.as_str()))
+        .chain(std::iter::once(("component name", component.name.as_str())))
+        .chain(
+            component
+                .required_services
+                .iter()
+                .map(|port| ("required port name", port.name.as_str())),
+        )
+        .chain(
+            component
+                .provided_services
+                .iter()
+                .map(|port| ("provided port name", port.name.as_str())),
+        )
+        .chain(
+            component
+                .parts
+                .iter()
+                .map(|part| ("part name", part.name.as_str())),
+        )
+    {
+        if PYTHON_KEYWORDS.contains(&identifier) {
+            return Err(invalid_ast(&format!(
+                "invalid Python identifier `{identifier}` used as {context}: Python keyword"
+            )));
+        }
+    }
+    Ok(())
+}
+
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
+
 fn default_output_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -794,8 +1002,38 @@ mod tests {
 
     fn parse(source: &str) -> Ast {
         let mut parser = Parser::new(source);
-        parser.next_token();
-        parser.namespace()
+        parser.next_token().expect("test source should lex");
+        parser.namespace().expect("test source should parse")
+    }
+
+    fn attach_dependency(owner: &mut Ast, dependency: Ast) {
+        let dependency_name = match &dependency {
+            Ast::SEQ(nodes) => nodes.iter().find_map(|node| match node {
+                Ast::Namespace { body, .. } => match body.as_ref() {
+                    Ast::Component { name, .. } => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }),
+            _ => None,
+        }
+        .expect("test dependency must contain a component");
+
+        let Ast::SEQ(nodes) = owner else {
+            panic!("test owner must be a top-level sequence");
+        };
+        let import = nodes
+            .iter_mut()
+            .find_map(|node| match node {
+                Ast::Import { path, ast }
+                    if path.last().is_some_and(|name| name == &dependency_name) =>
+                {
+                    Some(ast)
+                }
+                _ => None,
+            })
+            .expect("test owner must import its dependency");
+        *import = Some(Box::new(dependency));
     }
 
     #[test]
@@ -834,6 +1072,67 @@ mod tests {
         assert!(source.contains("def make_client(self) -> Client:"));
         assert!(source.contains("part._bind_demarreur(self.parts().simple().starter())"));
         assert!(source.contains("return self.parts().client().letsgo()"));
+    }
+
+    #[test]
+    fn missing_part_bindings_are_rejected_before_rendering() {
+        let sink = parse(
+            "namespace mismatch { \
+             component Sink { requires input: String } }",
+        );
+        let mut owner = parse(
+            "import mismatch.Sink namespace mismatch { component Owner { \
+             part sink: Sink } }",
+        );
+        attach_dependency(&mut owner, sink);
+
+        let result = GenPython::new(owner).render();
+
+        assert!(
+            result.is_err(),
+            "Python generation must reject a part whose required port is not bound"
+        );
+    }
+
+    #[test]
+    fn incompatible_binding_types_are_rejected_before_rendering() {
+        let source = parse(
+            "namespace mismatch { \
+             component Source { provides value: String } }",
+        );
+        let sink = parse(
+            "namespace mismatch { \
+             component Sink { requires input: Integer } }",
+        );
+        let mut owner = parse(
+            "import mismatch.Source import mismatch.Sink \
+             namespace mismatch { component Owner { \
+             part source: Source \
+             part sink: Sink { bind input to source.value } } }",
+        );
+        attach_dependency(&mut owner, source);
+        attach_dependency(&mut owner, sink);
+
+        let result = GenPython::new(owner).render();
+
+        assert!(
+            result.is_err(),
+            "Python generation must reject a String service bound to an Integer requirement"
+        );
+    }
+
+    #[test]
+    fn python_keywords_are_rejected_before_rendering() {
+        let result = GenPython::new(parse(
+            "namespace mismatch { \
+             component Keyword { provides lambda: Runnable } }",
+        ))
+        .render();
+
+        assert!(
+            result.is_err(),
+            "Python generation must reject port names that are Python keywords"
+        );
     }
 
     #[test]
